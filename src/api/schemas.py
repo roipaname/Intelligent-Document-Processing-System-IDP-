@@ -23,7 +23,7 @@ class ValidationStatus(str,Enum):
     NEEDS_REVIEW="needs_review"
 
 # ============ REQUEST SCHEMAS ============
-class DocumentUploadRequest(BaseModel):
+class DocumentUploadResponse(BaseModel):
     documment_id:str
     filename:str
     file_size:int
