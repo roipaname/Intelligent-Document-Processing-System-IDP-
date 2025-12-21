@@ -9,17 +9,17 @@ CREATE TABLE IF NOT EXISTS documents(
     status VARCHAR CHECK( status IN ('pending','processing','completed','failed')) DEFAULT 'pending',
     error_message TEXT,
     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    proccessed_at TIMESTAMP,
+    processed_at TIMESTAMP,
     created_by VARCHAR,
-    metadata JSONB,
+    document_metadata JSONB,
 
-    CONSTRAINT  valid_dates CHECK (proccessed_at is NULL OR proccessed_at>=uploaded_at)
+    CONSTRAINT  valid_dates CHECK (processed_at is NULL OR processed_at>=uploaded_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
 CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(document_type);
 CREATE INDEX IF NOT EXISTS idx_documents_uploaded ON documents(uploaded_at DESC);
-CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING gin(metadata);
+CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING gin(document_metadata);
 
 
 
