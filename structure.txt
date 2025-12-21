@@ -1,0 +1,117 @@
+idp-system/
+│
+├── src/
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── main.py                    # FastAPI app entry
+│   │   ├── routes/
+│   │   │   ├── __init__.py
+│   │   │   ├── documents.py           # Upload, status, results
+│   │   │   ├── health.py              # Health checks
+│   │   │   └── validation.py          # Validation endpoints
+│   │   ├── schemas/
+│   │   │   ├── __init__.py
+│   │   │   ├── document.py            # Pydantic models
+│   │   │   ├── invoice.py
+│   │   │   └── contract.py
+│   │   └── middleware/
+│   │       ├── auth.py
+│   │       └── error_handler.py
+│   │
+│   ├── processing/
+│   │   ├── __init__.py
+│   │   ├── pipeline.py                # Main orchestration
+│   │   ├── ocr/
+│   │   │   ├── __init__.py
+│   │   │   ├── tesseract_engine.py
+│   │   │   └── layoutlm_engine.py
+│   │   ├── layout/
+│   │   │   ├── __init__.py
+│   │   │   ├── table_detector.py
+│   │   │   ├── region_classifier.py
+│   │   │   └── structure_parser.py
+│   │   ├── extraction/
+│   │   │   ├── __init__.py
+│   │   │   ├── base_extractor.py
+│   │   │   ├── invoice_extractor.py
+│   │   │   ├── contract_extractor.py
+│   │   │   └── ner_models.py          # spaCy/Transformers
+│   │   └── validation/
+│   │       ├── __init__.py
+│   │       ├── rules_engine.py
+│   │       ├── confidence_scorer.py
+│   │       └── business_rules.py
+│   │
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── database.py                # SQLAlchemy models
+│   │   └── enums.py
+│   │
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── document_service.py
+│   │   ├── storage_service.py         # S3/local storage
+│   │   └── notification_service.py
+│   │
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   ├── pdf_utils.py
+│   │   ├── image_preprocessor.py
+│   │   ├── logger.py
+│   │   └── metrics.py
+│   │
+│   └── config/
+│       ├── __init__.py
+│       ├── settings.py                # Environment configs
+│       └── logging_config.py
+│
+├── tests/
+│   ├── unit/
+│   │   ├── test_ocr.py
+│   │   ├── test_extraction.py
+│   │   └── test_validation.py
+│   ├── integration/
+│   │   ├── test_pipeline.py
+│   │   └── test_api.py
+│   └── fixtures/
+│       ├── sample_invoices/
+│       ├── sample_contracts/
+│       └── expected_outputs/
+│
+├── data/
+│   ├── raw/                           # Sample documents
+│   ├── processed/                     # Processed outputs
+│   ├── models/                        # Trained models
+│   └── training/                      # Training datasets
+│
+├── notebooks/
+│   ├── 01_data_exploration.ipynb
+│   ├── 02_model_training.ipynb
+│   └── 03_accuracy_analysis.ipynb
+│
+├── scripts/
+│   ├── train_ner_model.py
+│   ├── evaluate_accuracy.py
+│   └── seed_database.py
+│
+├── docker/
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   └── requirements.txt
+│
+├── docs/
+│   ├── API.md                         # API documentation
+│   ├── ARCHITECTURE.md
+│   ├── ACCURACY_REPORT.md
+│   └── USER_GUIDE.md
+│
+├── alembic/                           # Database migrations
+│   ├── versions/
+│   └── env.py
+│
+├── .env.example
+├── .gitignore
+├── requirements.txt
+├── setup.py
+├── README.md
+└── pyproject.toml
