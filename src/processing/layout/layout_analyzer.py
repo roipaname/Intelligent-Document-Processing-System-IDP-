@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict
 from enum import Enum
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -302,7 +303,7 @@ if __name__ == "__main__":
         print("Testing Layout Analyzer...")
         
         # Convert first page to image
-        images = convert_from_path(test_pdf, dpi=300, first_page=1, last_page=1)
+        images = convert_from_path(test_pdf, dpi=300, first_page=1, last_page=1,poppler_path="/opt/local/bin")
         
         analyzer = LayoutAnalyzer()
         regions = analyzer.analyze(images[0], page=1)

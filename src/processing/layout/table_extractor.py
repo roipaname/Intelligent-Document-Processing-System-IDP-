@@ -5,50 +5,246 @@ from typing import List, Dict, Tuple, Optional
 import pandas as pd
 import logging
 from pathlib import Path
+import camelot
+from pdfminer.high_level import extract_text
+from pdf2image import convert_from_path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def pdf_has_text(pdf_path: str, min_chars: int = 50) -> bool:
+    """
+    Check if PDF has extractable text (native PDF, not scanned)
+    
+    Args:
+        pdf_path: Path to PDF file
+        min_chars: Minimum number of characters to consider as "has text"
+        
+    Returns:
+        True if PDF has extractable text, False otherwise
+    """
+    try:
+        text = extract_text(pdf_path)
+        has_text = text and len(text.strip()) > min_chars
+        logger.info(f"PDF text detection: {'Text-based PDF' if has_text else 'Scanned PDF (image)'}")
+        return has_text
+    except Exception as e:
+        logger.warning(f"Error checking PDF text: {e}")
+        return False
+
+
 class TableExtractor:
     """
-    Extract structured data from tables in documents
+    Intelligent table extractor that adapts to PDF type
     
-    Approach:
-    1. Detect table boundaries using line detection
-    2. Detect rows and columns by finding grid lines
-    3. Extract cell contents using OCR
-    4. Build structured data (pandas DataFrame)
+    Strategy:
+    - Text-based PDFs: Use Camelot (fast, accurate, no OCR needed)
+    - Scanned PDFs: Use computer vision + OCR (slower but works on images)
     
     Features:
+    - Automatic PDF type detection
     - Handles bordered and borderless tables
     - Detects merged cells
     - Auto-detects headers
     - Handles multi-line cells
     """
     
-    def __init__(self, min_cell_width: int = 20, min_cell_height: int = 10):
+    def __init__(
+        self,
+        min_cell_width: int = 20,
+        min_cell_height: int = 10,
+        dpi: int = 300,
+        poppler_path: Optional[str] = None
+    ):
         """
         Initialize table extractor
         
         Args:
-            min_cell_width: Minimum width for a valid cell (pixels)
-            min_cell_height: Minimum height for a valid cell (pixels)
+            min_cell_width: Minimum width for a valid cell (pixels) - OCR mode
+            min_cell_height: Minimum height for a valid cell (pixels) - OCR mode
+            dpi: DPI for PDF to image conversion - OCR mode
+            poppler_path: Path to poppler binaries (required on some systems)
         """
         self.min_cell_width = min_cell_width
         self.min_cell_height = min_cell_height
-        logger.info("Initialized Table Extractor")
+        self.dpi = dpi
+        self.poppler_path = poppler_path
+        logger.info("Initialized Intelligent Table Extractor")
+    
+    def extract_tables_from_pdf(
+        self,
+        pdf_path: str,
+        pages: str = 'all',
+        flavor: str = 'lattice'
+    ) -> List[pd.DataFrame]:
+        """
+        Main entry point: Intelligently extract tables from PDF
+        
+        Decision Tree:
+        1. Check if PDF has extractable text
+        2. If YES → Use Camelot (fast, no OCR)
+        3. If NO → Convert to image → Use computer vision + OCR
+        
+        Args:
+            pdf_path: Path to PDF file
+            pages: Pages to process ('all' or '1,2,3' or '1-3')
+            flavor: Camelot flavor ('lattice' for bordered, 'stream' for borderless)
+            
+        Returns:
+            List of pandas DataFrames (one per table)
+        """
+        pdf_path = Path(pdf_path)
+        
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+        
+        logger.info(f"Processing PDF: {pdf_path.name}")
+        
+        # DECISION POINT: Does PDF have extractable text?
+        if pdf_has_text(str(pdf_path)):
+            # PATH A: Text-based PDF → Use Camelot (NO OCR)
+            logger.info("📄 Using Camelot extraction (text-based PDF)")
+            return self._extract_with_camelot(str(pdf_path), pages, flavor)
+        else:
+            # PATH B: Scanned PDF → Use OCR
+            logger.info("🖼️  Using OCR extraction (scanned/image PDF)")
+            return self._extract_with_ocr(str(pdf_path), pages)
+    
+    def _extract_with_camelot(
+        self,
+        pdf_path: str,
+        pages: str = 'all',
+        flavor: str = 'lattice'
+    ) -> List[pd.DataFrame]:
+        """
+        Extract tables using Camelot (for text-based PDFs)
+        
+        Advantages:
+        - Very fast (no OCR needed)
+        - High accuracy
+        - Preserves text formatting
+        - Handles complex tables
+        
+        Args:
+            pdf_path: Path to PDF
+            pages: Pages to extract ('all', '1', '1,2,3', '1-3')
+            flavor: 'lattice' (bordered tables) or 'stream' (borderless)
+            
+        Returns:
+            List of DataFrames
+        """
+        try:
+            # Extract tables with Camelot
+            tables = camelot.read_pdf(
+                pdf_path,
+                pages=pages,
+                flavor=flavor,
+                suppress_stdout=True
+            )
+            
+            logger.info(f"Camelot found {len(tables)} table(s)")
+            
+            dataframes = []
+            for i, table in enumerate(tables):
+                df = table.df
+                
+                # Clean the DataFrame
+                df = self._clean_camelot_dataframe(df)
+                
+                if df is not None and not df.empty:
+                    dataframes.append(df)
+                    logger.info(
+                        f"Table {i+1}: {df.shape[0]} rows × {df.shape[1]} cols "
+                        f"(accuracy: {table.accuracy:.1f}%)"
+                    )
+            
+            # If lattice failed and found no tables, try stream flavor
+            if not dataframes and flavor == 'lattice':
+                logger.info("No tables found with lattice, trying stream flavor...")
+                return self._extract_with_camelot(pdf_path, pages, flavor='stream')
+            
+            return dataframes
+            
+        except Exception as e:
+            logger.error(f"Camelot extraction failed: {e}")
+            logger.info("Falling back to OCR extraction...")
+            return self._extract_with_ocr(pdf_path, pages)
+    
+    def _extract_with_ocr(self, pdf_path: str, pages: str = 'all') -> List[pd.DataFrame]:
+        """
+        Extract tables using OCR (for scanned/image PDFs)
+        
+        Pipeline:
+        1. Convert PDF pages to images
+        2. Detect table regions using computer vision
+        3. Extract cells using line detection
+        4. OCR each cell
+        5. Build DataFrames
+        
+        Args:
+            pdf_path: Path to PDF
+            pages: Pages to extract
+            
+        Returns:
+            List of DataFrames
+        """
+        # Import OCR engine
+        try:
+            from src.processing.ocr.tesseract_engine import TesseractOCR
+        except ImportError:
+            logger.error("TesseractOCR not available. Install required dependencies.")
+            return []
+        
+        # Convert PDF to images
+        logger.info("Converting PDF to images for OCR...")
+        
+        try:
+            # Parse pages parameter
+            if pages == 'all':
+                images = convert_from_path(
+                    pdf_path,
+                    dpi=self.dpi,
+                    poppler_path=self.poppler_path
+                )
+            else:
+                # Parse page numbers (e.g., '1,2,3' or '1-3')
+                page_nums = self._parse_page_numbers(pages)
+                images = convert_from_path(
+                    pdf_path,
+                    dpi=self.dpi,
+                    first_page=min(page_nums),
+                    last_page=max(page_nums),
+                    poppler_path=self.poppler_path
+                )
+        except Exception as e:
+            logger.error(f"PDF to image conversion failed: {e}")
+            return []
+        
+        logger.info(f"Converted {len(images)} page(s) to images")
+        
+        # Initialize OCR engine
+        ocr_engine = TesseractOCR()
+        
+        # Extract tables from each page
+        all_tables = []
+        for page_num, image in enumerate(images, start=1):
+            logger.info(f"Processing page {page_num}/{len(images)}...")
+            tables = self.extract_tables(image, ocr_engine)
+            all_tables.extend(tables)
+        
+        return all_tables
     
     def extract_tables(self, image: Image.Image, ocr_engine) -> List[pd.DataFrame]:
         """
-        Extract all tables from an image
+        Extract tables from a single image using computer vision + OCR
         
         Args:
             image: PIL Image object
-            ocr_engine: TesseractOCR instance for text extraction
+            ocr_engine: TesseractOCR instance
             
         Returns:
-            List of pandas DataFrames (one per detected table)
+            List of DataFrames
         """
         # Convert PIL Image to OpenCV format
         img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
@@ -89,33 +285,71 @@ class TableExtractor:
         
         return tables
     
-    def _detect_table_regions(self, gray: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    def _clean_camelot_dataframe(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """
-        Detect regions in the image that likely contain tables
+        Clean DataFrame extracted by Camelot
         
-        Args:
-            gray: Grayscale image as numpy array
+        - Remove empty rows/columns
+        - Detect and set headers
+        - Strip whitespace
+        """
+        if df.empty:
+            return None
+        
+        # Strip whitespace from all cells
+        df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        
+        # Use first row as header if it looks like one
+        if len(df) > 1:
+            first_row = df.iloc[0]
+            # Check if first row has mostly text (not numbers)
+            text_cells = sum(
+                isinstance(val, str) and val and not val.replace('.', '').replace(',', '').isdigit()
+                for val in first_row
+            )
             
-        Returns:
-            List of bounding boxes (x, y, width, height)
-        """
-        # Detect horizontal lines
-        horizontal = self._detect_lines(gray, horizontal=True)
+            if text_cells >= len(first_row) * 0.5:  # At least 50% text
+                df.columns = df.iloc[0]
+                df = df.drop(0).reset_index(drop=True)
         
-        # Detect vertical lines
+        # Remove completely empty rows
+        df = df.replace('', np.nan)
+        df = df.dropna(how='all')
+        
+        # Remove completely empty columns
+        df = df.dropna(axis=1, how='all')
+        
+        # Reset index
+        df = df.reset_index(drop=True)
+        
+        return df if not df.empty else None
+    
+    def _parse_page_numbers(self, pages: str) -> List[int]:
+        """Parse page number string to list of integers"""
+        page_nums = []
+        
+        for part in pages.split(','):
+            if '-' in part:
+                start, end = map(int, part.split('-'))
+                page_nums.extend(range(start, end + 1))
+            else:
+                page_nums.append(int(part))
+        
+        return sorted(set(page_nums))
+    
+    # ========== COMPUTER VISION METHODS (for OCR path) ==========
+    
+    def _detect_table_regions(self, gray: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """Detect table regions using line detection"""
+        horizontal = self._detect_lines(gray, horizontal=True)
         vertical = self._detect_lines(gray, horizontal=False)
         
-        # Combine horizontal and vertical lines to find table intersections
         table_mask = cv2.addWeighted(horizontal, 0.5, vertical, 0.5, 0)
-        
-        # Threshold to get binary image
         _, table_binary = cv2.threshold(table_mask, 50, 255, cv2.THRESH_BINARY)
         
-        # Dilate to connect nearby regions
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         table_binary = cv2.dilate(table_binary, kernel, iterations=2)
         
-        # Find contours (table boundaries)
         contours, _ = cv2.findContours(
             table_binary,
             cv2.RETR_EXTERNAL,
@@ -125,9 +359,6 @@ class TableExtractor:
         regions = []
         for contour in contours:
             x, y, w, h = cv2.boundingRect(contour)
-            
-            # Filter out small regions (noise)
-            # Tables should be reasonably large
             if w > 100 and h > 50:
                 regions.append((x, y, w, h))
                 logger.debug(f"Detected table region: ({x},{y}) size=({w}x{h})")
@@ -135,50 +366,20 @@ class TableExtractor:
         return regions
     
     def _detect_lines(self, gray: np.ndarray, horizontal: bool = True) -> np.ndarray:
-        """
-        Detect horizontal or vertical lines in the image
-        
-        Args:
-            gray: Grayscale image
-            horizontal: If True, detect horizontal lines; else vertical
-            
-        Returns:
-            Binary image with detected lines
-        """
+        """Detect horizontal or vertical lines"""
         if horizontal:
-            # Horizontal line detection kernel (wide and short)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
         else:
-            # Vertical line detection kernel (narrow and tall)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
         
-        # Apply morphological opening to detect lines
-        lines = cv2.morphologyEx(
-            gray,
-            cv2.MORPH_OPEN,
-            kernel,
-            iterations=2
-        )
-        
+        lines = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel, iterations=2)
         return lines
     
     def _extract_cells(self, gray: np.ndarray, region: Tuple[int, int, int, int]) -> List[Dict]:
-        """
-        Extract individual cells from a table region
-        
-        Args:
-            gray: Grayscale image
-            region: Table bounding box (x, y, width, height)
-            
-        Returns:
-            List of cell dictionaries with position and coordinates
-        """
+        """Extract individual cells from table region"""
         x, y, w, h = region
-        
-        # Extract table region
         table_roi = gray[y:y+h, x:x+w]
         
-        # Detect grid lines within the table
         horizontal_lines = self._find_line_positions(table_roi, horizontal=True)
         vertical_lines = self._find_line_positions(table_roi, horizontal=False)
         
@@ -188,7 +389,6 @@ class TableExtractor:
             logger.warning("Not enough grid lines detected for table extraction")
             return []
         
-        # Build cells from line intersections
         cells = []
         for i in range(len(horizontal_lines) - 1):
             for j in range(len(vertical_lines) - 1):
@@ -202,37 +402,19 @@ class TableExtractor:
                     "text": ""
                 }
                 
-                # Filter out cells that are too small
                 if cell["width"] >= self.min_cell_width and cell["height"] >= self.min_cell_height:
                     cells.append(cell)
         
         logger.debug(f"Extracted {len(cells)} cells from table")
-        
         return cells
     
     def _find_line_positions(self, image: np.ndarray, horizontal: bool = True) -> List[int]:
-        """
-        Find positions of grid lines in the image
-        
-        Uses projection profile method:
-        - For horizontal lines: sum pixels along each row
-        - For vertical lines: sum pixels along each column
-        
-        Args:
-            image: Grayscale image of table region
-            horizontal: If True, find horizontal lines; else vertical
-            
-        Returns:
-            List of line positions (pixel coordinates)
-        """
+        """Find positions of grid lines"""
         if horizontal:
-            # Sum along columns to find horizontal lines
             projection = np.sum(image < 128, axis=1)
         else:
-            # Sum along rows to find vertical lines
             projection = np.sum(image < 128, axis=0)
         
-        # Find peaks in the projection (these are lines)
         threshold = np.max(projection) * 0.3 if np.max(projection) > 0 else 0
         
         lines = []
@@ -241,21 +423,16 @@ class TableExtractor:
         
         for i, val in enumerate(projection):
             if val > threshold and not in_line:
-                # Start of a line
                 in_line = True
                 line_start = i
             elif val <= threshold and in_line:
-                # End of a line
                 in_line = False
-                # Use middle of the line as position
                 line_pos = (line_start + i) // 2
                 lines.append(line_pos)
         
-        # Add final line if we're still in one
         if in_line:
             lines.append((line_start + len(projection)) // 2)
         
-        # Add boundaries (edges of table)
         if not lines or lines[0] > 5:
             lines.insert(0, 0)
         if not lines or lines[-1] < len(projection) - 5:
@@ -264,39 +441,24 @@ class TableExtractor:
         return lines
     
     def _extract_cell_text(self, image: Image.Image, cells: List[Dict], ocr_engine) -> List[Dict]:
-        """
-        Extract text from each cell using OCR
-        
-        Args:
-            image: Original PIL Image
-            cells: List of cell dictionaries with coordinates
-            ocr_engine: TesseractOCR instance
-            
-        Returns:
-            Updated cells list with extracted text
-        """
+        """Extract text from each cell using OCR"""
         import pytesseract
         
         for idx, cell in enumerate(cells):
             try:
-                # Crop cell region from image
                 cropped = image.crop((
-                    cell["x"] + 2,  # Small padding to avoid borders
+                    cell["x"] + 2,
                     cell["y"] + 2,
                     cell["x"] + cell["width"] - 2,
                     cell["y"] + cell["height"] - 2
                 ))
                 
-                # Extract text using OCR
-                # PSM 7 = single line, PSM 6 = single block
                 text = pytesseract.image_to_string(
                     cropped,
-                    config='--psm 7'  # Treat as single text line
+                    config='--psm 7'
                 ).strip()
                 
-                # Clean extracted text
-                text = ' '.join(text.split())  # Remove extra whitespace
-                
+                text = ' '.join(text.split())
                 cell["text"] = text
                 
                 if text:
@@ -309,58 +471,40 @@ class TableExtractor:
         return cells
     
     def _cells_to_dataframe(self, cells: List[Dict]) -> Optional[pd.DataFrame]:
-        """
-        Convert extracted cells to a pandas DataFrame
-        
-        Args:
-            cells: List of cell dictionaries with row, col, and text
-            
-        Returns:
-            pandas DataFrame or None if conversion fails
-        """
+        """Convert extracted cells to DataFrame"""
         if not cells:
             return None
         
         try:
-            # Find grid dimensions
             max_row = max(cell["row"] for cell in cells)
             max_col = max(cell["col"] for cell in cells)
             
             logger.debug(f"Building DataFrame: {max_row+1} rows x {max_col+1} cols")
             
-            # Build 2D array
             grid = [['' for _ in range(max_col + 1)] for _ in range(max_row + 1)]
             
             for cell in cells:
                 grid[cell["row"]][cell["col"]] = cell["text"]
             
-            # Convert to DataFrame
             df = pd.DataFrame(grid)
             
-            # Detect and use first row as header if it looks like one
+            # Detect header
             if len(df) > 1:
                 first_row_values = df.iloc[0].values
                 first_row_text = ' '.join(str(x) for x in first_row_values if x)
                 
-                # Heuristic: if first row has text but very few numbers, it's probably a header
                 if first_row_text:
                     digit_count = sum(c.isdigit() for c in first_row_text)
                     total_chars = len(first_row_text.replace(' ', ''))
                     
                     if total_chars > 0 and digit_count / total_chars < 0.3:
-                        # Looks like a header
                         df.columns = df.iloc[0]
                         df = df.drop(0).reset_index(drop=True)
                         logger.debug("Using first row as header")
             
-            # Remove completely empty rows
             df = df.replace('', np.nan)
             df = df.dropna(how='all')
-            
-            # Remove completely empty columns
             df = df.dropna(axis=1, how='all')
-            
-            # Reset index
             df = df.reset_index(drop=True)
             
             return df
@@ -368,185 +512,47 @@ class TableExtractor:
         except Exception as e:
             logger.error(f"Error converting cells to DataFrame: {e}")
             return None
-    
-    def extract_table_at_region(
-        self,
-        image: Image.Image,
-        bbox: Tuple[int, int, int, int],
-        ocr_engine
-    ) -> Optional[pd.DataFrame]:
-        """
-        Extract a table from a specific region
-        
-        Args:
-            image: PIL Image
-            bbox: Bounding box (x, y, width, height)
-            ocr_engine: TesseractOCR instance
-            
-        Returns:
-            pandas DataFrame or None
-        """
-        img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        
-        cells = self._extract_cells(gray, bbox)
-        
-        if not cells:
-            return None
-        
-        cells = self._extract_cell_text(image, cells, ocr_engine)
-        df = self._cells_to_dataframe(cells)
-        
-        return df
-
-
-# ============ HELPER FUNCTIONS ============
-
-def visualize_table_detection(image: Image.Image, tables: List[pd.DataFrame], output_path: str = None):
-    """
-    Visualize detected tables on the image
-    
-    Args:
-        image: Original PIL Image
-        tables: List of extracted DataFrames
-        output_path: Path to save visualization (optional)
-    """
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    
-    fig, ax = plt.subplots(1, figsize=(12, 8))
-    ax.imshow(image)
-    
-    # Draw bounding boxes (placeholder - would need to store regions)
-    ax.set_title(f"Detected {len(tables)} tables")
-    ax.axis('off')
-    
-    if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        logger.info(f"Saved visualization to {output_path}")
-    else:
-        plt.show()
-    
-    plt.close()
-
-
-def merge_similar_tables(tables: List[pd.DataFrame], similarity_threshold: float = 0.8) -> List[pd.DataFrame]:
-    """
-    Merge tables that have similar structures (same columns)
-    
-    Useful when a table spans multiple pages or regions
-    
-    Args:
-        tables: List of DataFrames
-        similarity_threshold: Minimum column similarity to merge (0-1)
-        
-    Returns:
-        List of merged DataFrames
-    """
-    if len(tables) <= 1:
-        return tables
-    
-    merged = []
-    used = set()
-    
-    for i, table1 in enumerate(tables):
-        if i in used:
-            continue
-        
-        current_group = [table1]
-        
-        for j, table2 in enumerate(tables[i+1:], start=i+1):
-            if j in used:
-                continue
-            
-            # Check column similarity
-            cols1 = set(table1.columns)
-            cols2 = set(table2.columns)
-            
-            if cols1 and cols2:
-                similarity = len(cols1 & cols2) / len(cols1 | cols2)
-                
-                if similarity >= similarity_threshold:
-                    current_group.append(table2)
-                    used.add(j)
-        
-        # Merge group
-        if len(current_group) > 1:
-            merged_table = pd.concat(current_group, ignore_index=True)
-            merged.append(merged_table)
-            logger.info(f"Merged {len(current_group)} tables")
-        else:
-            merged.append(table1)
-        
-        used.add(i)
-    
-    return merged
 
 
 # ============ TESTING ============
 
 if __name__ == "__main__":
-    from pdf2image import convert_from_path
-    from pathlib import Path
-    
-    # Import OCR engine (need to adjust path based on your structure)
-    import sys
-    sys.path.append(str(Path(__file__).parent.parent.parent))
-    
-    try:
-        from src.processing.ocr.tesseract_engine import TesseractOCR
-    except ImportError:
-        logger.error("Could not import TesseractOCR. Make sure the module exists.")
-        sys.exit(1)
-    
-    # Test file path
     test_pdf = "./data/uploads/Hons_Quote_AI.pdf"
     
     if Path(test_pdf).exists():
-        print("="*60)
-        print("Testing Table Extractor")
-        print("="*60)
+        print("="*70)
+        print("INTELLIGENT TABLE EXTRACTION TEST")
+        print("="*70)
         
-        # Convert PDF to image
-        print("\n1. Converting PDF to image...")
-        images = convert_from_path(test_pdf, dpi=300, first_page=1, last_page=1)
-        print(f"   ✓ Converted {len(images)} page(s)")
+        # Initialize extractor
+        extractor = TableExtractor(poppler_path="/opt/local/bin")
         
-        # Initialize OCR and extractor
-        print("\n2. Initializing OCR engine and table extractor...")
-        ocr = TesseractOCR()
-        extractor = TableExtractor()
-        print("   ✓ Initialized")
+        # Extract tables (automatically chooses Camelot or OCR)
+        print("\n🔍 Analyzing PDF and extracting tables...")
+        tables = extractor.extract_tables_from_pdf(test_pdf, pages='all')
         
-        # Extract tables
-        print("\n3. Extracting tables...")
-        tables = extractor.extract_tables(images[0], ocr)
-        print(f"   ✓ Extracted {len(tables)} table(s)")
+        print(f"\n✅ Extracted {len(tables)} table(s)\n")
         
         # Display results
         if tables:
-            print("\n4. Table contents:")
             for i, table in enumerate(tables, 1):
-                print(f"\n{'='*60}")
+                print(f"\n{'='*70}")
                 print(f"TABLE {i}")
-                print(f"{'='*60}")
-                print(f"Shape: {table.shape[0]} rows × {table.shape[1]} columns")
-                print(f"\nPreview:")
+                print(f"{'='*70}")
+                print(f"Shape: {table.shape[0]} rows × {table.shape[1]} columns\n")
                 print(table.head(10))
                 
                 # Save to CSV
                 output_file = f"./data/processed/table_{i}.csv"
                 Path(output_file).parent.mkdir(parents=True, exist_ok=True)
                 table.to_csv(output_file, index=False)
-                print(f"\n✓ Saved to: {output_file}")
+                print(f"\n💾 Saved to: {output_file}")
         else:
-            print("\n   ⚠ No tables detected in the document")
+            print("⚠️  No tables detected in the document")
         
-        print("\n" + "="*60)
-        print("Test completed successfully!")
-        print("="*60)
+        print("\n" + "="*70)
+        print("✅ Test completed!")
+        print("="*70)
         
     else:
         print(f"❌ Test file not found: {test_pdf}")
-        print("\nPlease ensure you have a sample PDF file at the specified location.")
-        print("You can place any PDF with tables for testing.")

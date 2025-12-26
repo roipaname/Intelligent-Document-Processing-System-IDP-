@@ -245,7 +245,7 @@ class TesseractOCR:
             }
             bounding_boxes.append(bbox)
             confidences.append(conf)
-        avg_confidence= np.mean(avg_confidence) if confidences else 0.0
+        avg_confidence= np.mean(confidences) if confidences else 0.0
         return bounding_boxes,avg_confidence
         
 
@@ -265,7 +265,7 @@ class TesseractOCR:
         """
         logger.info(f"Extracting text from PDF: {pdf_path}")
         try:
-          images=convert_from_path(pdf_path,dpi=self.dpi,fmt='png',thread_count=4)
+          images=convert_from_path(pdf_path,dpi=self.dpi,fmt='png',thread_count=4,poppler_path="/opt/local/bin")
           logger.info(f"Converted PDF to {len(images)} images")
         except Exception as e:
             logger.error(f"Failed to convert PDF to images: {e}")
