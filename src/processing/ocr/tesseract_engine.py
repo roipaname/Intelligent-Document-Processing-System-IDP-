@@ -84,9 +84,9 @@ class TesseractOCR:
         
         # Route to appropriate handler
         if file_path.suffix.lower() == '.pdf':
-            return self._extract_from_pdf(file_path)
+            return self.extract_from_pdf(file_path)
         elif file_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.tiff', '.bmp']:
-            return self._extract_from_image(file_path)
+            return self.extract_from_image(file_path)
         else:
             raise ValueError(f"Unsupported file type: {file_path.suffix}")
     
