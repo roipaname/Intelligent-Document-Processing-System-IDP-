@@ -302,6 +302,7 @@ if __name__ == "__main__":
     if Path(test_pdf).exists():
         print("Testing Layout Analyzer...")
         
+        
         # Convert first page to image
         images = convert_from_path(test_pdf, dpi=300, first_page=1, last_page=1,poppler_path="/opt/local/bin")
         
