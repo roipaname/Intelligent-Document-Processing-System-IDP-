@@ -25,7 +25,7 @@ class ValidationStatus(str,Enum):
 
 # ============ REQUEST SCHEMAS ============
 class DocumentUploadResponse(BaseModel):
-    documment_id:str
+    document_id:str
     filename:str
     file_size:int
     document_type:Optional[DocumentType]
