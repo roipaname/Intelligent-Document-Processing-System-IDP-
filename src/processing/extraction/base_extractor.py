@@ -1,191 +1,236 @@
 #src/processing/extraction/base_extractor.py
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+"""
+Base extractor class for all document types
+"""
 import re
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class BaseExtractor(ABC):
+class BaseExtractor:
     """
-    Base class for document field extractors
+    Base class for document data extraction
     
-    Provides common utility methods for text extraction
+    Provides common utility methods for:
+    - Pattern matching
+    - Date parsing
+    - Amount extraction
+    - Confidence scoring
     """
     
     def __init__(self):
-        """Initialize common patterns"""
-        # Date patterns
+        """Initialize common extraction patterns"""
+        # Common date patterns
         self.date_patterns = [
-            (r'\d{4}-\d{2}-\d{2}', '%Y-%m-%d'),           # 2024-01-15
-            (r'\d{2}/\d{2}/\d{4}', '%d/%m/%Y'),           # 15/01/2024
-            (r'\d{2}/\d{2}/\d{4}', '%m/%d/%Y'),           # 01/15/2024
-            (r'\d{2}-\d{2}-\d{4}', '%d-%m-%Y'),           # 15-01-2024
-            (r'\d{1,2}\s+[A-Za-z]+\s+\d{4}', '%d %B %Y'), # 15 January 2024
-            (r'[A-Za-z]+\s+\d{1,2},?\s+\d{4}', '%B %d, %Y'), # January 15, 2024
+            r'\d{4}-\d{2}-\d{2}',          # 2024-01-15
+            r'\d{2}/\d{2}/\d{4}',          # 01/15/2024
+            r'\d{2}-\d{2}-\d{4}',          # 01-15-2024
+            r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}',  # 15 January 2024
         ]
         
-        # Amount patterns
+        # Common amount patterns
         self.amount_patterns = [
-            r'(?:total|amount|sum|balance)\s*:?\s*\$?\s*([0-9,]+\.?\d{0,2})',
-            r'\$\s*([0-9,]+\.?\d{2})',
-            r'(?:R|ZAR|USD|EUR|GBP)\s*([0-9,]+\.?\d{2})',
-            r'([0-9,]+\.\d{2})',
+            r'\$\s*([0-9,]+\.?\d{0,2})',   # $1,234.56
+            r'([0-9,]+\.\d{2})',           # 1,234.56
+            r'R\s*([0-9,]+\.?\d{0,2})',    # R1,234.56 (ZAR)
+            r'€\s*([0-9,]+\.?\d{0,2})',    # €1,234.56
+            r'£\s*([0-9,]+\.?\d{0,2})',    # £1,234.56
         ]
         
         # Email pattern
-        self.email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        self.email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
         
         # Phone patterns
         self.phone_patterns = [
-            r'\+?\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}',
-            r'\d{3}[-.\s]?\d{3}[-.\s]?\d{4}',
+            r'\+?\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}',  # International
+            r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',  # (123) 456-7890
+            r'\d{3}[-.\s]?\d{3}[-.\s]?\d{4}',  # 123-456-7890
         ]
+        
+        logger.info(f"Initialized {self.__class__.__name__}")
     
-    @abstractmethod
-    def extract(self, text: str, tables: List[Dict] = None) -> Dict:
+    def extract(self, text: str, tables: List[Dict] = None, **kwargs) -> Dict:
         """
-        Extract structured data from text
+        Main extraction method - to be implemented by subclasses
         
         Args:
-            text: Raw text from document
-            tables: Extracted tables (optional)
+            text: Raw extracted text
+            tables: Extracted tables
+            **kwargs: Additional parameters
             
         Returns:
-            Dictionary with extracted fields
+            Dictionary with extracted data
         """
-        pass
+        raise NotImplementedError("Subclasses must implement extract()")
     
-    def extract_date(self, text: str, keywords: List[str]) -> Optional[datetime]:
+    def find_pattern(
+        self, 
+        text: str, 
+        patterns: List[str], 
+        flags: int = re.IGNORECASE
+    ) -> Optional[str]:
         """
-        Extract date near specific keywords
+        Find first match from list of patterns
         
         Args:
             text: Text to search
-            keywords: Keywords to look for (e.g., ['invoice date', 'date'])
+            patterns: List of regex patterns
+            flags: Regex flags
             
         Returns:
-            Parsed datetime object or None
+            Matched string or None
         """
-        lines = text.split('\n')
+        for pattern in patterns:
+            match = re.search(pattern, text, flags)
+            if match:
+                return match.group(1) if match.groups() else match.group(0)
+        return None
+    
+    def find_all_patterns(
+        self, 
+        text: str, 
+        patterns: List[str], 
+        flags: int = re.IGNORECASE
+    ) -> List[str]:
+        """Find all matches from list of patterns"""
+        results = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, flags)
+            results.extend(matches)
+        return results
+    
+    def extract_date(
+        self, 
+        text: str, 
+        context_keywords: List[str] = None
+    ) -> Optional[datetime]:
+        """
+        Extract date with optional context
         
-        for i, line in enumerate(lines):
-            line_lower = line.lower()
+        Args:
+            text: Text to search
+            context_keywords: Keywords to search near (e.g., ['invoice date'])
             
-            # Check if line contains any keyword
-            if any(keyword.lower() in line_lower for keyword in keywords):
-                # Search this line and next few lines
-                search_text = ' '.join(lines[i:min(i+3, len(lines))])
-                
-                # Try each date pattern
-                for pattern, date_format in self.date_patterns:
-                    match = re.search(pattern, search_text)
-                    if match:
-                        date_str = match.group(0)
-                        parsed_date = self._parse_date(date_str, date_format)
-                        if parsed_date:
-                            logger.debug(f"Found date '{date_str}' near keywords {keywords}")
-                            return parsed_date
+        Returns:
+            Parsed datetime or None
+        """
+        search_text = text
+        
+        # If context keywords provided, narrow search
+        if context_keywords:
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                if any(kw.lower() in line.lower() for kw in context_keywords):
+                    # Search in this line and next 2 lines
+                    search_text = ' '.join(lines[i:min(i+3, len(lines))])
+                    break
+        
+        # Find date pattern
+        date_str = self.find_pattern(search_text, self.date_patterns)
+        
+        if date_str:
+            return self.parse_date(date_str)
         
         return None
     
-    def _parse_date(self, date_str: str, date_format: str) -> Optional[datetime]:
-        """Parse date string with given format"""
-        try:
-            return datetime.strptime(date_str, date_format)
-        except ValueError:
-            # Try alternate format if initial fails
-            if date_format == '%d/%m/%Y':
-                try:
-                    return datetime.strptime(date_str, '%m/%d/%Y')
-                except ValueError:
-                    pass
-            return None
-    
-    def extract_amount(self, text: str, keywords: List[str]) -> Optional[float]:
+    def parse_date(self, date_str: str) -> Optional[datetime]:
         """
-        Extract monetary amount near keywords
+        Parse date string to datetime object
+        
+        Args:
+            date_str: Date string
+            
+        Returns:
+            Datetime object or None
+        """
+        formats = [
+            '%Y-%m-%d',
+            '%d/%m/%Y',
+            '%m/%d/%Y',
+            '%d-%m-%Y',
+            '%m-%d-%Y',
+            '%d %B %Y',
+            '%d %b %Y',
+            '%B %d, %Y',
+            '%b %d, %Y',
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str.strip(), fmt)
+            except ValueError:
+                continue
+        
+        logger.warning(f"Could not parse date: {date_str}")
+        return None
+    
+    def extract_amount(
+        self, 
+        text: str, 
+        context_keywords: List[str] = None
+    ) -> Optional[float]:
+        """
+        Extract monetary amount with optional context
         
         Args:
             text: Text to search
-            keywords: Keywords to look for
+            context_keywords: Keywords near amount (e.g., ['total', 'amount due'])
             
         Returns:
-            Extracted amount or None
+            Float amount or None
         """
-        lines = text.split('\n')
+        search_text = text
         
-        for line in lines:
-            line_lower = line.lower()
-            
-            # Check if line contains keyword
-            if any(keyword.lower() in line_lower for keyword in keywords):
-                # Try to extract amount from this line
-                for pattern in self.amount_patterns:
-                    match = re.search(pattern, line, re.IGNORECASE)
-                    if match:
-                        amount_str = match.group(1).replace(',', '')
-                        try:
-                            amount = float(amount_str)
-                            logger.debug(f"Found amount {amount} near keywords {keywords}")
-                            return amount
-                        except ValueError:
-                            continue
+        # If context keywords provided, narrow search
+        if context_keywords:
+            lines = text.split('\n')
+            for line in lines:
+                if any(kw.lower() in line.lower() for kw in context_keywords):
+                    search_text = line
+                    break
+        
+        # Find amount
+        amount_str = self.find_pattern(search_text, self.amount_patterns)
+        
+        if amount_str:
+            try:
+                # Remove commas and parse
+                amount = float(amount_str.replace(',', ''))
+                return amount
+            except ValueError:
+                logger.warning(f"Could not parse amount: {amount_str}")
         
         return None
     
     def extract_email(self, text: str) -> Optional[str]:
         """Extract email address"""
-        match = re.search(self.email_pattern, text)
-        if match:
-            email = match.group(0)
-            logger.debug(f"Found email: {email}")
-            return email
-        return None
+        match = re.search(self.email_pattern, text, re.IGNORECASE)
+        return match.group(0) if match else None
     
     def extract_phone(self, text: str) -> Optional[str]:
         """Extract phone number"""
-        for pattern in self.phone_patterns:
-            match = re.search(pattern, text)
-            if match:
-                phone = match.group(0)
-                logger.debug(f"Found phone: {phone}")
-                return phone
+        phone = self.find_pattern(text, self.phone_patterns)
+        if phone:
+            # Clean phone number
+            phone = re.sub(r'[^\d+]', '', phone)
+            return phone
         return None
     
-    def extract_by_label(self, text: str, label: str, pattern: str = r':\s*(.+)') -> Optional[str]:
+    def extract_lines_near_keyword(
+        self, 
+        text: str, 
+        keyword: str, 
+        num_lines: int = 3
+    ) -> List[str]:
         """
-        Extract value by label (e.g., 'Invoice Number: INV-001')
+        Extract lines near a keyword
         
         Args:
-            text: Text to search
-            label: Label to look for
-            pattern: Regex pattern for value extraction
-            
-        Returns:
-            Extracted value or None
-        """
-        lines = text.split('\n')
-        
-        for line in lines:
-            if label.lower() in line.lower():
-                match = re.search(f'{re.escape(label)}{pattern}', line, re.IGNORECASE)
-                if match:
-                    value = match.group(1).strip()
-                    logger.debug(f"Found {label}: {value}")
-                    return value
-        
-        return None
-    
-    def extract_lines_after_keyword(self, text: str, keyword: str, num_lines: int = 3) -> List[str]:
-        """
-        Extract N lines after a keyword
-        
-        Args:
-            text: Text to search
-            keyword: Keyword to find
+            text: Full text
+            keyword: Keyword to search for
             num_lines: Number of lines to extract after keyword
             
         Returns:
@@ -195,13 +240,7 @@ class BaseExtractor(ABC):
         
         for i, line in enumerate(lines):
             if keyword.lower() in line.lower():
-                # Extract next N lines
-                extracted = []
-                for j in range(i+1, min(i+1+num_lines, len(lines))):
-                    line_text = lines[j].strip()
-                    if line_text:
-                        extracted.append(line_text)
-                return extracted
+                return [l.strip() for l in lines[i:min(i+num_lines, len(lines))] if l.strip()]
         
         return []
     
@@ -210,22 +249,29 @@ class BaseExtractor(ABC):
         Calculate extraction confidence based on required fields
         
         Args:
-            extracted_data: Dictionary of extracted fields
-            required_fields: List of field names that are required
+            extracted_data: Extracted data dictionary
+            required_fields: List of required field names
             
         Returns:
-            Confidence score (0-1)
+            Confidence score (0.0 to 1.0)
         """
         if not required_fields:
             return 1.0
         
+        # Count extracted required fields
         extracted_count = sum(
             1 for field in required_fields 
-            if extracted_data.get(field) not in [None, '', []]
+            if extracted_data.get(field) is not None
         )
         
-        confidence = extracted_count / len(required_fields)
+        base_confidence = extracted_count / len(required_fields)
         
-        logger.debug(f"Confidence: {confidence:.2%} ({extracted_count}/{len(required_fields)} required fields)")
-        
-        return confidence
+        return base_confidence
+    
+    def clean_text(self, text: str) -> str:
+        """Clean and normalize text"""
+        # Remove extra whitespace
+        text = re.sub(r'\s+', ' ', text)
+        # Remove special characters
+        text = re.sub(r'[^\w\s.,;:!?()-]', '', text)
+        return text.strip()
